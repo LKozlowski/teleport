@@ -18,14 +18,18 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"time"
 
 	"github.com/gravitational/teleport/api/client/proto"
+	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/types"
 	libauth "github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/auth/native"
@@ -359,6 +363,12 @@ func (a *dbAuth) getTLSConfigVerifyFull(ctx context.Context, sessionCtx *Session
 		tlsConfig.InsecureSkipVerify = true
 		// This will verify CN and cert chain on each connection.
 		tlsConfig.VerifyConnection = getVerifyCloudSQLCertificate(tlsConfig.RootCAs)
+		// Generate client SSL certificate
+		clientCert, err := a.generateCloudSQLClientCertificate(ctx, sessionCtx)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		tlsConfig.Certificates = append(tlsConfig.Certificates, clientCert)
 	}
 
 	dbTLSConfig := sessionCtx.Database.GetTLS()
@@ -367,8 +377,9 @@ func (a *dbAuth) getTLSConfigVerifyFull(ctx context.Context, sessionCtx *Session
 		tlsConfig.ServerName = dbTLSConfig.ServerName
 	}
 
-	// RDS/Aurora/Redshift and Cloud SQL auth is done with an auth token so
+	// RDS/Aurora/Redshift auth is done with an auth token so
 	// don't generate a client certificate and exit here.
+	// CloudSQL client certificate was already generated above.
 	if sessionCtx.Database.IsCloudHosted() {
 		return tlsConfig, nil
 	}
@@ -503,6 +514,56 @@ func (a *dbAuth) GetAuthPreference(ctx context.Context) (types.AuthPreference, e
 // Close releases all resources used by authenticator.
 func (a *dbAuth) Close() error {
 	return a.cfg.Clients.Close()
+}
+
+// generateCloudSQLClientCertificate returns a new client certificate with RSA key generated
+// using Google's GenerateEphemeralCertRequest sqladmin API. Client certificates as required
+// when enabling SSL in Cloud SQL.
+func (a *dbAuth) generateCloudSQLClientCertificate(ctx context.Context, sessionCtx *Session) (tls.Certificate, error) {
+	svc, err := a.cfg.Clients.GetGCPSQLAdminClient(ctx)
+	if err != nil {
+		return tls.Certificate{}, trace.Wrap(err)
+	}
+
+	// generate RSA private key, x509 encoded public key,
+	// and append to certificate request
+	pkey, err := rsa.GenerateKey(rand.Reader, constants.RSAKeySize)
+	if err != nil {
+		return tls.Certificate{}, trace.Wrap(err)
+	}
+	pkix, err := x509.MarshalPKIXPublicKey(pkey.Public())
+	if err != nil {
+		return tls.Certificate{}, trace.Wrap(err)
+	}
+	gcp := sessionCtx.Database.GetGCP()
+	req := svc.Connect.GenerateEphemeralCert(gcp.ProjectID, gcp.InstanceID, &sqladmin.GenerateEphemeralCertRequest{
+		PublicKey: string(pem.EncodeToMemory(&pem.Block{Bytes: pkix, Type: "RSA PUBLIC KEY"})),
+	})
+
+	// make request to generate certificate
+	resp, err := req.Do()
+	if err != nil {
+		return tls.Certificate{}, trace.Errorf("requesting client certificate: %w", err)
+	}
+
+	// PEM decode and parse returned x509 certificate
+	bl, _ := pem.Decode([]byte(resp.EphemeralCert.Cert))
+	if bl == nil {
+		return tls.Certificate{}, trace.Wrap(err)
+	}
+	cert, err := x509.ParseCertificate(bl.Bytes)
+	if err != nil {
+		return tls.Certificate{}, trace.Errorf("parsing certificate for instance %q: %w", gcp.InstanceID, err)
+	}
+
+	// create client certificate
+	tlscert := tls.Certificate{
+		Certificate: [][]byte{cert.Raw},
+		PrivateKey:  pkey,
+		Leaf:        cert,
+	}
+
+	return tlscert, nil
 }
 
 // getVerifyCloudSQLCertificate returns a function that performs verification
