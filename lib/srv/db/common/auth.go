@@ -364,11 +364,13 @@ func (a *dbAuth) getTLSConfigVerifyFull(ctx context.Context, sessionCtx *Session
 		// This will verify CN and cert chain on each connection.
 		tlsConfig.VerifyConnection = getVerifyCloudSQLCertificate(tlsConfig.RootCAs)
 		// Generate client SSL certificate
-		clientCert, err := a.generateCloudSQLClientCertificate(ctx, sessionCtx)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		tlsConfig.Certificates = append(tlsConfig.Certificates, clientCert)
+		/*
+			clientCert, err := a.generateCloudSQLClientCertificate(ctx, sessionCtx)
+			if err != nil {
+				return nil, trace.Errorf("generating client certificate: %w", err)
+			}
+			tlsConfig.Certificates = append(tlsConfig.Certificates, *clientCert)
+		*/
 	}
 
 	dbTLSConfig := sessionCtx.Database.GetTLS()
@@ -517,23 +519,26 @@ func (a *dbAuth) Close() error {
 }
 
 // generateCloudSQLClientCertificate returns a new client certificate with RSA key generated
-// using Google's GenerateEphemeralCertRequest sqladmin API. Client certificates as required
+// using Google's GenerateEphemeralCertRequest sqladmin API. Client certificates are required
 // when enabling SSL in Cloud SQL.
-func (a *dbAuth) generateCloudSQLClientCertificate(ctx context.Context, sessionCtx *Session) (tls.Certificate, error) {
+func (a *dbAuth) generateCloudSQLClientCertificate(ctx context.Context, sessionCtx *Session) (*tls.Certificate, error) {
 	svc, err := a.cfg.Clients.GetGCPSQLAdminClient(ctx)
 	if err != nil {
-		return tls.Certificate{}, trace.Wrap(err)
+		return nil, trace.Wrap(err)
 	}
+
+	// TODO(jimbishopp): cache database certificates to avoid expensive generate
+	// operation on each connection.
 
 	// generate RSA private key, x509 encoded public key,
 	// and append to certificate request
 	pkey, err := rsa.GenerateKey(rand.Reader, constants.RSAKeySize)
 	if err != nil {
-		return tls.Certificate{}, trace.Wrap(err)
+		return nil, trace.Wrap(err)
 	}
 	pkix, err := x509.MarshalPKIXPublicKey(pkey.Public())
 	if err != nil {
-		return tls.Certificate{}, trace.Wrap(err)
+		return nil, trace.Wrap(err)
 	}
 	gcp := sessionCtx.Database.GetGCP()
 	req := svc.Connect.GenerateEphemeralCert(gcp.ProjectID, gcp.InstanceID, &sqladmin.GenerateEphemeralCertRequest{
@@ -541,29 +546,17 @@ func (a *dbAuth) generateCloudSQLClientCertificate(ctx context.Context, sessionC
 	})
 
 	// make request to generate certificate
-	resp, err := req.Do()
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
-		return tls.Certificate{}, trace.Errorf("requesting client certificate: %w", err)
+		return nil, trace.Wrap(err)
 	}
 
-	// PEM decode and parse returned x509 certificate
-	bl, _ := pem.Decode([]byte(resp.EphemeralCert.Cert))
-	if bl == nil {
-		return tls.Certificate{}, trace.Wrap(err)
-	}
-	cert, err := x509.ParseCertificate(bl.Bytes)
+	// create tls certificate from ephemeral cert and private key
+	cert, err := tls.X509KeyPair([]byte(resp.EphemeralCert.Cert), tlsca.MarshalPrivateKeyPEM(pkey))
 	if err != nil {
-		return tls.Certificate{}, trace.Errorf("parsing certificate for instance %q: %w", gcp.InstanceID, err)
+		return nil, trace.Wrap(err)
 	}
-
-	// create client certificate
-	tlscert := tls.Certificate{
-		Certificate: [][]byte{cert.Raw},
-		PrivateKey:  pkey,
-		Leaf:        cert,
-	}
-
-	return tlscert, nil
+	return &cert, nil
 }
 
 // getVerifyCloudSQLCertificate returns a function that performs verification
