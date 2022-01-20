@@ -26,9 +26,9 @@ import (
 
 	"github.com/coreos/go-semver/semver"
 	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/google/uuid"
 	"github.com/gravitational/trace"
 	"github.com/gravitational/trace/trail"
-	"github.com/pborman/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -232,7 +232,7 @@ func (g *GRPCServer) CreateAuditStream(stream proto.AuthService_CreateAuditStrea
 					Metadata: apievents.Metadata{
 						Type:        events.SessionUploadEvent,
 						Code:        events.SessionUploadCode,
-						ID:          uuid.New(),
+						ID:          uuid.New().String(),
 						Index:       events.SessionUploadIndex,
 						ClusterName: clusterName.GetClusterName(),
 					},
@@ -3244,6 +3244,19 @@ func (g *GRPCServer) UpdateWindowsDesktop(ctx context.Context, desktop *types.Wi
 		return nil, trace.Wrap(err)
 	}
 	if err := auth.UpdateWindowsDesktop(ctx, desktop); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return &empty.Empty{}, nil
+}
+
+// UpsertWindowsDesktop updates a Windows desktop host, creating it if it doesn't exist.
+func (g *GRPCServer) UpsertWindowsDesktop(ctx context.Context, desktop *types.WindowsDesktopV3) (*empty.Empty, error) {
+	auth, err := g.authenticate(ctx)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	if err := auth.UpsertWindowsDesktop(ctx, desktop); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
