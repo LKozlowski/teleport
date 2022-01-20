@@ -1051,7 +1051,7 @@ func (set RoleSet) CheckKubeGroupsAndUsers(ttl time.Duration, overrideTTL bool, 
 		}
 	}
 	for _, role := range set {
-		ok, err := RoleMatchers(matchers).MatchAll(role, types.Deny)
+		ok, _, err := RoleMatchers(matchers).MatchAny(role, types.Deny)
 		if err != nil {
 			return nil, nil, trace.Wrap(err)
 		}

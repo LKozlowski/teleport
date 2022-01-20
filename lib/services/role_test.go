@@ -3670,6 +3670,10 @@ func TestCheckKubeGroupsAndUsers(t *testing.T) {
 		},
 		{
 			name: "deny access with system:masters kube group",
+			kubeResLabels: map[string]string{
+				"env":     "prod",
+				"release": "test",
+			},
 			roles: RoleSet{
 				&types.RoleV4{
 					Metadata: types.Metadata{Name: "roleA", Namespace: apidefaults.Namespace},
@@ -3678,7 +3682,8 @@ func TestCheckKubeGroupsAndUsers(t *testing.T) {
 							KubeGroups: []string{"system:masters", "groupA"},
 							KubeUsers:  []string{"dev-user"},
 							KubernetesLabels: map[string]apiutils.Strings{
-								"env": []string{"prod"},
+								"env":     []string{"prod"},
+								"release": []string{"test"},
 							},
 						},
 					},
@@ -3689,7 +3694,7 @@ func TestCheckKubeGroupsAndUsers(t *testing.T) {
 						Deny: types.RoleConditions{
 							KubeGroups: []string{"system:masters"},
 							KubernetesLabels: map[string]apiutils.Strings{
-								types.Wildcard: []string{types.Wildcard},
+								"env": []string{"prod"},
 							},
 						},
 					},
